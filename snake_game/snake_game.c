@@ -7,6 +7,9 @@
 #define MEDIUM_DELAY 100000
 #define HARD_DELAY   60000
 
+/* Start length (change this) */
+#define INITIAL_SNAKE_LEN 12
+
 typedef struct SnakeSegment {
     int x, y;
     struct SnakeSegment *next;
@@ -23,6 +26,9 @@ typedef struct {
 } Food;
 
 int max_x, max_y;
+/* Play area (top-left origin and size) */
+int play_x0, play_y0, play_w, play_h;
+
 Snake snake;
 Food food;
 int score = 0;
@@ -38,6 +44,7 @@ void spawn_food();
 void end_game();
 void erase_tail();
 int show_menu();
+void free_snake();
 
 int main() {
     initscr();
@@ -66,12 +73,25 @@ int main() {
     }
 
     clear();
+
+    /***** Compute a smaller centered playable area *****/
+    /* Use 50% of terminal for a tighter play area */
+    play_w = max_x * 50 / 100;
+    play_h = max_y * 50 / 100;
+    /* Fallback minimum sizes */
+    if (play_w < 20) play_w = max_x - 4;
+    if (play_h < 10) play_h = max_y - 4;
+    play_x0 = (max_x - play_w) / 2;
+    play_y0 = (max_y - play_h) / 2;
+
     init_game();
     draw_borders();
 
     while (1) {
+        /* Score and level displayed above play area */
         attron(COLOR_PAIR(4));
-        mvprintw(0, 2, "Score: %d | Level: %s", score,
+        mvprintw(play_y0 - 1, play_x0, " Score: %d | Level: %s ",
+                 score,
                  (delay_time == EASY_DELAY) ? "Easy" :
                  (delay_time == MEDIUM_DELAY) ? "Medium" : "Hard");
         attroff(COLOR_PAIR(4));
@@ -83,10 +103,11 @@ int main() {
 
         if (paused) {
             attron(COLOR_PAIR(4));
-            mvprintw(max_y / 2, max_x / 2 - 5, "--- PAUSED ---");
+            mvprintw(play_y0 + play_h / 2, play_x0 + play_w / 2 - 6, "--- PAUSED ---");
             attroff(COLOR_PAIR(4));
         } else {
-            mvprintw(max_y / 2, max_x / 2 - 5, "             ");
+            /* Clear paused message area */
+            mvprintw(play_y0 + play_h / 2, play_x0 + play_w / 2 - 6, "               ");
         }
 
         refresh();
@@ -154,50 +175,80 @@ int show_menu() {
 }
 
 void init_game() {
+    /* Initialize direction */
     snake.dir_x = 1;
     snake.dir_y = 0;
+    snake.head = snake.tail = NULL;
+
+    /* Create initial snake centered in play area */
+    int start_x = play_x0 + play_w / 2;
+    int start_y = play_y0 + play_h / 2;
 
     SnakeSegment *prev = NULL;
-    for (int i = 0; i < 35; ++i) {
+    for (int i = 0; i < INITIAL_SNAKE_LEN; ++i) {
         SnakeSegment *seg = malloc(sizeof(SnakeSegment));
-        seg->x = max_x / 2 - i;
-        seg->y = max_y / 2;
+        seg->x = start_x - i;   /* grow leftwards from head */
+        seg->y = start_y;
         seg->next = NULL;
         if (prev) prev->next = seg;
         else snake.head = seg;
         prev = seg;
     }
     snake.tail = prev;
+
+    score = 0;
     spawn_food();
 }
 
 void draw_borders() {
     attron(COLOR_PAIR(3));
-    for (int i = 0; i < max_x; ++i) {
-        mvaddch(1, i, '#');
-        mvaddch(max_y - 1, i, '#');
+    /* top and bottom */
+    for (int i = play_x0; i < play_x0 + play_w; ++i) {
+        mvaddch(play_y0, i, '#');
+        mvaddch(play_y0 + play_h - 1, i, '#');
     }
-    for (int i = 1; i < max_y; ++i) {
-        mvaddch(i, 0, '#');
-        mvaddch(i, max_x - 1, '#');
+    /* left and right */
+    for (int i = play_y0; i < play_y0 + play_h; ++i) {
+        mvaddch(i, play_x0, '#');
+        mvaddch(i, play_x0 + play_w - 1, '#');
     }
     attroff(COLOR_PAIR(3));
 }
 
 void draw_snake() {
     attron(COLOR_PAIR(1));
-    mvaddch(snake.head->y, snake.head->x, 'O');
+    /* Draw full snake: head as 'O', body as 'o' */
+    SnakeSegment *cur = snake.head;
+    int first = 1;
+    while (cur) {
+        if (first) {
+            mvaddch(cur->y, cur->x, 'O');
+            first = 0;
+        } else {
+            mvaddch(cur->y, cur->x, 'o');
+        }
+        cur = cur->next;
+    }
     attroff(COLOR_PAIR(1));
 }
 
+/* Remove last segment (tail) from screen and list */
 void erase_tail() {
+    if (!snake.head) return;
+    if (!snake.head->next) {
+        /* single segment: nothing to erase (we keep at least head) */
+        return;
+    }
     SnakeSegment *curr = snake.head;
+    /* find second last */
     while (curr->next && curr->next->next) {
         curr = curr->next;
     }
+    /* curr->next is tail */
     mvaddch(curr->next->y, curr->next->x, ' ');
     free(curr->next);
     curr->next = NULL;
+    snake.tail = curr;
 }
 
 void move_snake() {
@@ -210,6 +261,7 @@ void move_snake() {
     new_head->next = snake.head;
     snake.head = new_head;
 
+    /* If eaten food, grow and respawn food; otherwise drop tail */
     if (new_x == food.x && new_y == food.y) {
         score += 10;
         spawn_food();
@@ -222,9 +274,11 @@ int check_collision() {
     int x = snake.head->x;
     int y = snake.head->y;
 
-    if (x <= 0 || x >= max_x - 1 || y <= 1 || y >= max_y - 1)
+    /* colliding with borders of play area */
+    if (x <= play_x0 || x >= play_x0 + play_w - 1 || y <= play_y0 || y >= play_y0 + play_h - 1)
         return 1;
 
+    /* self-collision */
     SnakeSegment *curr = snake.head->next;
     while (curr) {
         if (curr->x == x && curr->y == y)
@@ -236,8 +290,8 @@ int check_collision() {
 
 void spawn_food() {
     while (1) {
-        int fx = rand() % (max_x - 2) + 1;
-        int fy = rand() % (max_y - 3) + 2;
+        int fx = (rand() % (play_w - 2)) + play_x0 + 1;
+        int fy = (rand() % (play_h - 2)) + play_y0 + 1;
 
         SnakeSegment *curr = snake.head;
         int conflict = 0;
@@ -257,15 +311,27 @@ void spawn_food() {
     }
 }
 
+void free_snake() {
+    SnakeSegment *cur = snake.head;
+    while (cur) {
+        SnakeSegment *n = cur->next;
+        free(cur);
+        cur = n;
+    }
+    snake.head = snake.tail = NULL;
+}
+
 void end_game() {
     nodelay(stdscr, FALSE);
     attron(COLOR_PAIR(4));
-    mvprintw(max_y / 2, max_x / 2 - 5, "Game Over!");
-    mvprintw(max_y / 2 + 1, max_x / 2 - 8, "Final Score: %d", score);
-    mvprintw(max_y / 2 + 2, max_x / 2 - 12, "Press any key to exit...");
+    mvprintw(play_y0 + play_h / 2 - 1, play_x0 + play_w / 2 - 5, "Game Over!");
+    mvprintw(play_y0 + play_h / 2, play_x0 + play_w / 2 - 8, "Final Score: %d", score);
+    mvprintw(play_y0 + play_h / 2 + 1, play_x0 + play_w / 2 - 12, "Press any key to exit...");
     attroff(COLOR_PAIR(4));
     refresh();
     getch();
+
+    free_snake();
     endwin();
 }
 
